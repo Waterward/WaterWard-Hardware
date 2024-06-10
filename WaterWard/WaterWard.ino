@@ -82,13 +82,30 @@ float calibration_value = 21.34;
 
 // wifi & mqtt
 WiFiClientSecure espClient;
+
+
 PubSubClient client(espClient);
+// -------------
+// Sensor Data
+// -------------
+float currentWaterflow = 0;
+float currentWaterflowAvg = 0;
+float currentPh = 0;
+float currentLevel = 0;
+float currentTemperature = 0;
+float currentTurbidity = 0;
+String currentTurbidityMessage;
+float currentTds = 0;
+bool lastPumpState = false;
+bool lastValveState = false;
 
 // -------------
 // Code
 // -------------
 void setup() {
-  Serial.begin(9600);
+  delay(500);
+  
+  Serial.begin(115200);
 
   // pinMode(PIN_SWITCH_LCD, INPUT_PULLUP);  // Set pin X as input with internal pull-up resistor
   pinMode(PIN_SWITCH_LCD, INPUT_PULLUP);          // Set pin X as input with internal pull-up resistor
@@ -100,13 +117,14 @@ void setup() {
 
   lcd.init();
   // lcd.begin(16, 2);
+  delay(1);
   lcd.backlight();  // Turn on the backlight
   // lcd.print("Water Level:");
 
   // Start up the library:
   sensors.begin();
 
-  // TDS -- Conductivity
+  // TDS -- TDS
   pinMode(PIN_TDS, INPUT);
   gravityTds.setPin(PIN_TDS);
   gravityTds.setAref(5.0);       //reference voltage on ADC, default 5.0V on Arduino UNO
@@ -125,9 +143,17 @@ void setup() {
   espClient.setCACert(MQTT_CERT);
   client.setServer(MQTT_SERVER, MQTT_PORT);
   client.setCallback(mqtt_callback);
+  mqtt_reconnect(true);
 }
 
 void loop() {
+
+  // mqtt
+  mqtt_reconnect();
+  client.loop();
+  // client.loop();
+  // mqtt_subscribe();
+
   // Serial.println(String(digitalPinToInterrupt(PIN_WATERFLOW)));
 
   // button check
@@ -148,21 +174,18 @@ void loop() {
   }
 
   // sensors check
-  if (checkElapsedTime(lastSensorsCheck, intervalSensorsCheck)) {
-    // readTemperature();
-    // Serial.println("Sensors checked");
+  // if (checkElapsedTime(lastSensorsCheck, intervalSensorsCheck)) {
+  //   // readTemperature();
+  //   // Serial.println("Sensors checked");
 
-    // last
-    switchLCD();
-  }
+  //   // last
+  //   switchLCD();
+  // }
 
-  // mqtt
-
-  // client.loop();
-  // mqtt_subscribe();
+  switchLCD();
 
   // Add a delay to avoid rapid updates
-  delay(200);
+  delay(1000);
 }
 
 // Temperature Sensor
@@ -174,7 +197,7 @@ float readTemperature() {
   // Fetch the temperature in degrees Celsius for device index:
   float tempC = sensors.getTempCByIndex(0);  // the index 0 refers to the first device
   // Fetch the temperature in degrees Fahrenheit for device index:
-  float tempF = sensors.getTempFByIndex(0);
+  // float tempF = sensors.getTempFByIndex(0);
 
   // Print the temperature in Celsius in the Serial Monitor:
   // Serial.print("Temperature: ");
@@ -188,6 +211,7 @@ float readTemperature() {
   // Serial.println("F");
 
   mqtt_publish("temperature", String(tempC));
+  currentTemperature = tempC;
 
   return tempC;
 
@@ -201,9 +225,10 @@ float readLevel() {
   float distance = ultrasonic.read();
 
   // Convert distance to water level (adjust as needed)
-  // int waterLevel = map(distance, 0, 200, 100, 0);
+  // int waterLevel = map(distance, 0, 200, 100, 0); // 200 cm
 
   mqtt_publish("level", String(distance));
+  currentLevel = distance;
 
   return distance;
 }
@@ -211,22 +236,28 @@ float readLevel() {
 // Turbidity Sensor
 String readTurbidity() {
   int val = analogRead(PIN_TURBIDITY_SENSOR);
-  long turbidity = map(val, 0, 2800, 10, 1);
+  long turbidity = map(val, 0, 4000, 0, 100);
 
   String state;
-  if (val > 1000)
-    state = " (Clean)";
+  if (turbidity < 25)
+    state = "(Clean)";
+  else if (turbidity > 25 && turbidity < 50)
+    state = "(Little Cloudy)";
+  else if (turbidity > 50 && turbidity < 75)
+    state = "(Cloudy)";
   else
-    state = " (Dirty)";
+    state = "(Dirty)";
 
-  String message = String(val) + state;
+  String message = String(turbidity) + " " + state;
 
   mqtt_publish("turbidity", String(message));
+  currentTurbidity = turbidity;
+  currentTurbidityMessage = message;
 
   return message;
 }
 
-float readConductivity() {
+float readTDS() {
   // float temperature = readTemperature();  //add your temperature sensor and read it
   float temperature = 25.0;                   //add your temperature sensor and read it
   gravityTds.setTemperature(temperature);     // set the temperature and execute temperature compensation
@@ -237,7 +268,9 @@ float readConductivity() {
   // Serial.println("ppm");
   // delay(1000);
   // return analogRead(PIN_TDS);
-  mqtt_publish("conductivity", String(tdsValue));
+  mqtt_publish("TDS", String(tdsValue));
+  currentTds = tdsValue;
+
   return tdsValue;
   // return calcTDS();
 }
@@ -255,11 +288,14 @@ float* readWaterflow() {
   waterVolume = waterVolume + diff;  // volume(L)=flow(L/s)*time(s)
   // average water flow
   waterVolumeAvg = diff;  // volume(L)=flow(L/s)*time(s)
-  Serial.println(waterVolume);
-  Serial.println(waterVolumeAvg);
+  // Serial.println(waterVolume);
+  // Serial.println(waterVolumeAvg);
   returnArray[0] = waterVolume;
   returnArray[1] = waterVolumeAvg;
   mqtt_publish("waterflow", "Total: " + String(waterVolume) + ", Avg: " + String(waterVolumeAvg));
+  currentWaterflow = waterVolume;
+  currentWaterflowAvg = waterVolumeAvg;
+  
   return returnArray;
 }
 
@@ -267,7 +303,6 @@ unsigned long timeSinceLastPhSample = 0;
 unsigned long timeCheckLastPhSample = 30;
 unsigned long int avgval;
 int buffer_arr[10];
-
 float getPh(float voltage) {
   return 7 + ((2.5 - voltage) / 0.18);
 }
@@ -278,43 +313,18 @@ float readPh() {
   int measurings = 0;
   for (int i = 0; i < samples; i++) {
     measurings += analogRead(PIN_PH);
-    delay(10);
+    // delay(10);
   }
   float voltage = 5 / adc_resolution * measurings / samples;
   // Serial.print("pH= ");
   // Serial.println(ph(voltage));
   float value =  getPh(voltage);
   mqtt_publish("pH", String(value));
+  currentPh = value;
+  
   // return value;
   return analogRead(PIN_PH);
 }
-// float readPh() {
-//   // sample
-//   for (int i = 0; i < 10 /*&& checkElapsedTime(timeSinceLastPhSample, timeCheckLastPhSample)*/; i++) {
-//     buffer_arr[i] = analogRead(PIN_PH);
-//     // checkElapsedTime(timeSinceLastPhSample, timeCheckLastPhSample);
-//     delay(30);
-//   }
-
-//   // sort
-//   float temp;
-//   for (int i = 0; i < 9; i++) {
-//     for (int j = i + 1; j < 10; j++) {
-//       if (buffer_arr[i] > buffer_arr[j]) {
-//         temp = buffer_arr[i];
-//         buffer_arr[i] = buffer_arr[j];
-//         buffer_arr[j] = temp;
-//       }
-//     }
-//   }
-//   avgval = 0;
-//   for (int i = 2; i < 8; i++)
-//     avgval += buffer_arr[i];
-//   float volt = (float)avgval * 5.0 / 1024 / 6;
-//   float ph_act = -5.70 * volt + calibration_value;
-//   mqtt_subscribe("pH", String(ph_act));
-//   return ph_act;
-// }
 
 // -------------
 // UTILITIES
@@ -325,86 +335,107 @@ void lcdWrite(int col, int row, bool clearLine, String text) {
     lcd.print("                ");
   // lcd.clear();
   lcd.setCursor(col, row);
+  lcd.print(text);
+}
 
-  lcd.println(text);
+
+// usage:
+// 1- Define a counter before the loop
+// 2- Use this method inside loop with counter param
+void printLoadingLCD(int& counter) {
+  String loading = ".";
+  for (int i = 1; i < counter; i++) // begin from 1, let the loop below add more
+    loading += ".";
+  // Serial.println(counter);
+  // Serial.println(loading);
+
+  for (int i = 0; i < counter; i++) {
+    lcdWrite(i, 1, false, loading);
+    loading += ".";
+  }
+  counter++;
+
+  if (counter > 12) // reset, lcd line limit
+    counter = 1;
 }
 
 void tempLCD(float value) {
-  lcdWrite(0, 0, true, "Temperature:      ");
-  lcdWrite(0, 1, true, String(value) + " C            ");  // " \xC2\xB0" +
+  lcdWrite(0, 0, true, "Temperature");
+  lcdWrite(0, 1, true, String(value) + " C");  // " \xC2\xB0" +
 }
 
-void turbidityLCD(String value) {
-  lcdWrite(0, 0, true, "Turbidity:      ");
-  lcdWrite(0, 1, true, String(value) + "              ");  // " \xC2\xB0" +
+void turbidityLCD(float value) {
+  lcdWrite(0, 0, true, "Turbidity:");
+  lcdWrite(0, 1, true, String(value));  // " \xC2\xB0" +
 }
 
 void levelLCD(int value) {
-  lcdWrite(0, 0, true, "Water Level:      ");
-  lcdWrite(0, 1, true, String(value) + " %            ");  // " \xC2\xB0" +
+  lcdWrite(0, 0, true, "Water Level:");
+  lcdWrite(0, 1, true, String(value) + " cm");  // " \xC2\xB0" +
 }
 
-void conductivityLCD(int value) {
-  lcdWrite(0, 0, true, "Conductivity:      ");
-  lcdWrite(0, 1, true, String(value) + " ppm              ");  // " \xC2\xB0" +
+void tdsLCD(int value) {
+  lcdWrite(0, 0, true, "TDS:");
+  lcdWrite(0, 1, true, String(value) + " ppm");  // " \xC2\xB0" +
 }
 
 void waterflowLCD(float totalValue, float avgValue) {
-  lcdWrite(0, 0, true, "Waterflow:      ");
-  lcdWrite(0, 1, true, "T " + String(totalValue) + " L, A " + String(avgValue) + "              ");  // " \xC2\xB0" +
+  lcdWrite(0, 0, true, "Waterflow:");
+  lcdWrite(0, 1, true, "T " + String(totalValue) + " L, A " + String(avgValue));  // " \xC2\xB0" +
 }
 
 void PhLCD(float value) {
-  lcdWrite(0, 0, true, "pH Value:      ");
-  lcdWrite(0, 1, true, String(value) + "              ");  // " \xC2\xB0" +
+  lcdWrite(0, 0, true, "pH Value:");
+  lcdWrite(0, 1, true, String(value));  // " \xC2\xB0" +
 }
 
 void switchLCD() {
   // Serial.println("Counter: " + String(lcdCounter));
+
   // test all
-  // readLevel();
-  // delay(10);
-  // readTemperature();
-  // delay(10);
-  // readTurbidity();
-  // delay(10);
-  // readConductivity();
-  // delay(10);
-  // readWaterflow();
-  // delay(10);
-  // readPh();
-  // delay(10);
+  readAll();
   
   switch (lcdCounter) {
     case 0:  // water level
-      levelLCD(readLevel());
+      levelLCD(currentLevel);
       break;
     case 1:  // temp
-      tempLCD(readTemperature());
+      tempLCD(currentTemperature);
       break;
     case 2:  // turbidity
-      turbidityLCD(readTurbidity());
+      turbidityLCD(currentTurbidity);
       break;
-    case 3:  // conductivity
-      conductivityLCD(readConductivity());
+    case 3:  // tds
+      tdsLCD(currentTds);
       break;
     case 4:
       {  // waterflow
-        float* theArray = readWaterflow();
-        float value[2] = { *theArray, *(theArray + 1) };
-        waterflowLCD(value[0], value[1]);
+        // float* theArray = readWaterflow();
+        // float value[2] = { *theArray, *(theArray + 1) };
+        // waterflowLCD(value[0], value[1]);
+        waterflowLCD(currentWaterflow, currentWaterflowAvg);
         // Serial.println("waterflow..");
-        // waterflowLCD(readConductivity());
+        // waterflowLCD(readTDS());
         break;
       }
     case 5:  // pH
-      PhLCD(readPh());
+      PhLCD(currentPh);
       break;
     default:  // reset
       lcdCounter = 0;
       switchLCD();
       break;
   }
+}
+
+void readAll() {
+  Serial.println("Reading All...");
+  readLevel();
+  readTemperature();
+  readTurbidity();
+  readTDS();
+  readWaterflow();
+  readPh();
 }
 
 bool checkElapsedTime(unsigned long& lastCheck, unsigned long interval) {
@@ -430,7 +461,7 @@ int getWaterflowFrequency() {
   waterflowPulses = 0;  // reset
   // delay(1000);
   // interrupts();     // We enable the interruptions
-  delay(500);
+  // delay(500);
   // if (checkElapsedTime(timeSinceLastWaterflowCheck, 1000)) {}   //sample for 1 second
   // noInterrupts();  // We disable the interruptions
   // Serial.println("pulses after: " + String(waterflowPulses));
@@ -442,9 +473,19 @@ int getWaterflowFrequency() {
 
 void togglePumpRelay(bool value) {
   digitalWrite(PIN_PUMP_RELAY, value);
+  lastPumpState = value;
 }
 void toggleValveRelay(bool value) {
   digitalWrite(PIN_VALVE_RELAY, value);
+  lastValveState = value;
+}
+
+void checkRelays(String topic, bool value) {
+  if (topic.endsWith("togglepump"))
+    togglePumpRelay(value);
+
+  if (topic.endsWith("togglevalve"))
+    toggleValveRelay(value);
 }
 
 bool stringToBool(String str) {
@@ -463,7 +504,7 @@ bool stringToBool(String str) {
 }
 
 void wifi_setup() {
-  delay(10);
+  // delay(10);
   // We start by connecting to a WiFi network
   Serial.println();
   Serial.print("Connecting to ");
@@ -472,9 +513,13 @@ void wifi_setup() {
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
 
+  // int loadingCounter = 1;
+  lcdWrite(0, 0, false, "WiFi ...");
+  lcdWrite(0, 1, false, WIFI_SSID);
   while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
     Serial.print(".");
+    // printLoadingLCD(loadingCounter);
+    delay(100);
   }
 
   randomSeed(micros());
@@ -499,9 +544,21 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length) {
 }
 
 void mqtt_reconnect() {
+  mqtt_reconnect(false);
+}
+
+void mqtt_reconnect(bool printToLcd) {
   // Loop until we’re reconnected
+  if (printToLcd) {
+    lcdWrite(0, 0, false, "MQTT ...");
+    lcdWrite(0, 1, false, MQTT_USERNAME);
+  }
+  int loadingCounter = 1;
   while (!client.connected()) {
     Serial.print("Attempting MQTT connection… ");
+    // if (printToLcd) {
+    //   printLoadingLCD(loadingCounter);
+    // }
     String clientId = "ESP32Client";
     // Attempt to connect
     if (client.connect(clientId.c_str(), MQTT_USERNAME, MQTT_PASS)) {
@@ -517,8 +574,8 @@ void mqtt_reconnect() {
     } else {
       Serial.print("failed, rc = ");
       Serial.print(client.state());
-      Serial.println("try again in 5 seconds");
-      // Wait 5 seconds before retrying
+      Serial.println("try again in 1 second(s)");
+      // Wait x seconds before retrying
       delay(1000);
     }
   }
@@ -526,10 +583,7 @@ void mqtt_reconnect() {
 
 long lastMqttMsg = 0;
 void mqtt_publish(String topic, String message) {
-  if (!client.connected()) {
-    mqtt_reconnect();
-  }
-  client.loop();
+  // mqtt_reconnect();
 
   unsigned long now = millis();
   if (now - lastMqttMsg > 1000) {
@@ -542,17 +596,9 @@ void mqtt_publish(String topic, String message) {
     // sprintf(topic, "%s/%s", MQTT_PUB_TOPIC, sub_topic); // Concatenate using sprintf
     // String topic = "Asdasd";
     client.publish(newTopic.c_str(), message.c_str());
-    Serial.print("Publish message: ");
+    Serial.print("Publish message to " + newTopic + ": ");
     Serial.println(message);
     // delay(50);
     // lastMqttMsg = now;
   }
-}
-
-void checkRelays(String topic, bool value) {
-  if (topic.endsWith("togglepump"))
-    togglePumpRelay(value);
-
-  if (topic.endsWith("togglevalve"))
-    toggleValveRelay(value);
 }
