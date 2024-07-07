@@ -20,6 +20,7 @@
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include <WiFiClientSecure.h>
+#include <ArduinoJson.h>
 
 #include "SECRET_VARS.h"
 
@@ -38,6 +39,11 @@
 #define PIN_VALVE_RELAY 17
 #define PIN_SWITCH_PUMP_RELAY 13
 #define PIN_SWITCH_VALVE_RELAY 2
+
+
+// Device ID
+String device_id = "esp32";
+String currentTankId = "";
 
 // -------------
 // Registeration
@@ -227,7 +233,8 @@ float readLevel() {
   // Convert distance to water level (adjust as needed)
   // int waterLevel = map(distance, 0, 200, 100, 0); // 200 cm
 
-  mqtt_publish("level", String(distance));
+  // mqtt_publish("level", String(distance));
+  mqtt_publish("waterLevel", String(distance));
   currentLevel = distance;
 
   return distance;
@@ -250,7 +257,8 @@ String readTurbidity() {
 
   String message = String(turbidity) + " " + state;
 
-  mqtt_publish("turbidity", String(message));
+  // mqtt_publish("turbidity", String(message));
+  mqtt_publish("turbidity", String(turbidity));
   currentTurbidity = turbidity;
   currentTurbidityMessage = message;
 
@@ -538,6 +546,7 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length) {
   for (int i = 0; i < length; i++) {
     result += (char)payload[i];
   }
+  checkComamnd(topic, payload, length);
   Serial.println(result);
 
   checkRelays(String(topic), stringToBool(result));
@@ -567,8 +576,8 @@ void mqtt_reconnect(bool printToLcd) {
       client.publish(MQTT_PUB_TOPIC, "Hello, I am Connected");
       // … and resubscribe
       client.subscribe(MQTT_SUB_TOPIC);
-      client.subscribe("waterward/ayham/hub/togglepump");
-      client.subscribe("waterward/ayham/hub/togglevalve");
+      // client.subscribe("waterward/ayham/hub/togglevalve");
+      client.subscribe("devices/esp32/commands");
       // client.subscribe("#");
       // client.subscribe(MQTT_SUB_TOPIC);
     } else {
@@ -585,13 +594,18 @@ long lastMqttMsg = 0;
 void mqtt_publish(String topic, String message) {
   // mqtt_reconnect();
 
+  if (currentTankId == "") {
+    return;
+  }
+
   unsigned long now = millis();
   if (now - lastMqttMsg > 1000) {
     // lastMqttMsg = now;
 
     // char topic[256]; // Buffer for the final topic string
     // String message = "Hello World! #" + String(value);
-    String newTopic = String(MQTT_PUB_TOPIC) + String("/") + topic;
+    // String newTopic = String(MQTT_PUB_TOPIC) + String("/") + topic;
+    String newTopic = "tanks/" + String(currentTankId) + String("/") + topic;
     // String topic = mainTopic.concat("/").concat(topic);
     // sprintf(topic, "%s/%s", MQTT_PUB_TOPIC, sub_topic); // Concatenate using sprintf
     // String topic = "Asdasd";
@@ -600,5 +614,37 @@ void mqtt_publish(String topic, String message) {
     Serial.println(message);
     // delay(50);
     // lastMqttMsg = now;
+  }
+}
+
+void checkComamnd(char* topic, byte* payload, unsigned int length) {
+  // Check if the received message is for attaching/detaching the tank
+  if (strcmp(topic, (String("devices/") + device_id + "/commands").c_str()) == 0) {
+    DynamicJsonDocument doc(1024);
+    DeserializationError error = deserializeJson(doc, payload, length);
+    if (error) {
+      Serial.print("deserializeJson() failed: ");
+      Serial.println(error.c_str());
+      return;
+    }
+    const char* command = doc["command"];
+    const char* tankId = doc["tankId"];
+
+    Serial.print("Command: ");
+    Serial.println(command);
+    Serial.print("Tank ID: ");
+    Serial.println(tankId);
+
+    if (strcmp(command, "attach") == 0) {
+      currentTankId = String(tankId);
+      Serial.println("Attached to tank: " + currentTankId);
+      client.subscribe(("tanks/" + currentTankId + "/togglepump").c_str());
+      client.subscribe(("tanks/" + currentTankId + "/togglevalve").c_str());
+    } else if (strcmp(command, "detach") == 0) {
+      if (currentTankId == tankId) {
+        currentTankId = "";
+        Serial.println("Detached from tank: " + String(tankId));
+      }
+    }
   }
 }
