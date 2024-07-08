@@ -21,6 +21,7 @@
 #include <PubSubClient.h>
 #include <WiFiClientSecure.h>
 #include <ArduinoJson.h>
+#include <FlowSensor.h>
 
 #include "SECRET_VARS.h"
 
@@ -32,7 +33,7 @@
 #define PIN_SWITCH_LCD 33  // see https://forum.arduino.cc/t/esp32-pins-that-support-pullup/1173356/4
 #define PIN_US_TRIGGER 12
 #define PIN_US_ECHO 14
-#define PIN_TDS 27
+#define PIN_TDS 26
 #define PIN_WATERFLOW 25
 #define PIN_PH 15
 #define PIN_PUMP_RELAY 5
@@ -41,9 +42,15 @@
 #define PIN_SWITCH_VALVE_RELAY 2
 
 
+// -------------
+// Defines
+// -------------
+#define waterflowSensorType YFS201
+
+
 // Device ID
-String device_id = "esp32";
-String currentTankId = "";
+String device_id = "esp32"; // hardcoded by manufacturer
+String currentTankId = ""; // once paired by application mqtt will work
 
 // -------------
 // Registeration
@@ -58,6 +65,9 @@ OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
 // tds
 GravityTDS gravityTds;  // https://mikroelectron.com/Product/Analog-TDS-Total-Dissolved-Solids-Sensor-Meter-for-domestic-water-hydroponic-and-other-water-quality-testing/
+
+
+FlowSensor Sensor(waterflowSensorType, PIN_WATERFLOW);
 
 // -------------
 // Intervals
@@ -108,90 +118,11 @@ bool lastValveState = false;
 // -------------
 // Code
 // -------------
-void setup() {
-  delay(500);
-  
-  Serial.begin(115200);
 
-  // pinMode(PIN_SWITCH_LCD, INPUT_PULLUP);  // Set pin X as input with internal pull-up resistor
-  pinMode(PIN_SWITCH_LCD, INPUT_PULLUP);          // Set pin X as input with internal pull-up resistor
-  pinMode(PIN_PH, INPUT);                         // ph
-  pinMode(PIN_PUMP_RELAY, OUTPUT);                // relay
-  pinMode(PIN_VALVE_RELAY, OUTPUT);               // relay
-  pinMode(PIN_SWITCH_PUMP_RELAY, INPUT_PULLUP);   // relay
-  pinMode(PIN_SWITCH_VALVE_RELAY, INPUT_PULLUP);  // relay
-
-  lcd.init();
-  // lcd.begin(16, 2);
-  delay(1);
-  lcd.backlight();  // Turn on the backlight
-  // lcd.print("Water Level:");
-
-  // Start up the library:
-  sensors.begin();
-
-  // TDS -- TDS
-  pinMode(PIN_TDS, INPUT);
-  gravityTds.setPin(PIN_TDS);
-  gravityTds.setAref(5.0);       //reference voltage on ADC, default 5.0V on Arduino UNO
-  gravityTds.setAdcRange(1024);  //1024 for 10bit ADC;4096 for 12bit ADC
-  gravityTds.begin();            //initialization
-
-  // Waterflow
-  pinMode(PIN_WATERFLOW, INPUT);
-  attachInterrupt(digitalPinToInterrupt(PIN_WATERFLOW), incrementWaterflowCount, RISING);  //(Interrupt 0(Pin2),function,rising edge)
-  waterflowTime = millis();
-
-  // wifi
-  wifi_setup();
-
-  // mqtt
-  espClient.setCACert(MQTT_CERT);
-  client.setServer(MQTT_SERVER, MQTT_PORT);
-  client.setCallback(mqtt_callback);
-  mqtt_reconnect(true);
-}
-
-void loop() {
-
-  // mqtt
-  mqtt_reconnect();
-  client.loop();
-  // client.loop();
-  // mqtt_subscribe();
-
-  // Serial.println(String(digitalPinToInterrupt(PIN_WATERFLOW)));
-
-  // button check
-  if (checkElapsedTime(lastButtonCheck, intervalButtonCheck)) {
-    // Serial.println("Button checked");
-    // Serial.print("Btn: ");
-    // Serial.println(digitalRead(PIN_SWITCH_LCD));
-    if (digitalRead(PIN_SWITCH_LCD) == LOW) {
-      lcdCounter += 1;
-      switchLCD();  // force update
-    }
-    if (digitalRead(PIN_SWITCH_PUMP_RELAY) == LOW) {
-      togglePumpRelay(!digitalRead(PIN_PUMP_RELAY));
-    }
-    if (digitalRead(PIN_SWITCH_VALVE_RELAY) == LOW) {
-      toggleValveRelay(!digitalRead(PIN_VALVE_RELAY));
-    }
-  }
-
-  // sensors check
-  // if (checkElapsedTime(lastSensorsCheck, intervalSensorsCheck)) {
-  //   // readTemperature();
-  //   // Serial.println("Sensors checked");
-
-  //   // last
-  //   switchLCD();
-  // }
-
-  switchLCD();
-
-  // Add a delay to avoid rapid updates
-  delay(1000);
+// a must function for waterflow sensor library
+void IRAM_ATTR count()
+{
+  Sensor.count();
 }
 
 // Temperature Sensor
@@ -270,8 +201,10 @@ float readTDS() {
   float temperature = 25.0;                   //add your temperature sensor and read it
   gravityTds.setTemperature(temperature);     // set the temperature and execute temperature compensation
   gravityTds.update();                        //sample and calculate
-  // float tdsValue = gravityTds.getTdsValue();  // then get the value
-  float tdsValue = analogRead(PIN_TDS);  // then get the value
+  float tdsValue = gravityTds.getTdsValue();  // then get the value
+  float tdsValueRaw = analogRead(PIN_TDS);  // then get the value
+  Serial.println("TDS: " + String(tdsValue));
+  Serial.println("TDS Raw: " + String(tdsValueRaw));
   // Serial.print(tdsValue);
   // Serial.println("ppm");
   // delay(1000);
@@ -283,7 +216,7 @@ float readTDS() {
   // return calcTDS();
 }
 
-float* readWaterflow() {
+float* readWaterflow_old() {
   static float returnArray[2];
 
   float frequency = getWaterflowFrequency();  //we obtain the frequency of the pulses in Hz
@@ -307,6 +240,26 @@ float* readWaterflow() {
   return returnArray;
 }
 
+float* readWaterflow() {
+  static float returnArray[2];
+  Sensor.read();
+  Serial.print("Flow rate (L/minute): ");
+  Serial.println(Sensor.getFlowRate_m());
+  Serial.print("Flow rate totla volume: ");
+  Serial.println(Sensor.getVolume());
+
+  waterVolume = Sensor.getFlowRate_s(); // per second
+  waterVolumeAvg = Sensor.getVolume();
+  currentWaterflow = waterVolume; 
+  currentWaterflowAvg = waterVolumeAvg;
+
+  mqtt_publish("waterflow", "Total: " + String(waterVolume) + ", Avg: " + String(waterVolumeAvg));
+  returnArray[0] = waterVolume;
+  returnArray[1] = waterVolumeAvg;
+  
+  return returnArray;
+}
+
 unsigned long timeSinceLastPhSample = 0;
 unsigned long timeCheckLastPhSample = 30;
 unsigned long int avgval;
@@ -316,22 +269,22 @@ float getPh(float voltage) {
 }
 
 int samples = 10;
-float adc_resolution = 1024.0;
+float adc_resolution = 4096.0;
 float readPh() {
   int measurings = 0;
   for (int i = 0; i < samples; i++) {
     measurings += analogRead(PIN_PH);
     // delay(10);
   }
-  float voltage = 5 / adc_resolution * measurings / samples;
+  float voltage = 3.3 / adc_resolution * measurings / samples;
   // Serial.print("pH= ");
   // Serial.println(ph(voltage));
   float value =  getPh(voltage);
   mqtt_publish("pH", String(value));
   currentPh = value;
   
-  // return value;
-  return analogRead(PIN_PH);
+  return value;
+  // return analogRead(PIN_PH);
 }
 
 // -------------
@@ -527,7 +480,7 @@ void wifi_setup() {
   while (WiFi.status() != WL_CONNECTED) {
     Serial.print(".");
     // printLoadingLCD(loadingCounter);
-    delay(100);
+    delay(500);
   }
 
   randomSeed(micros());
@@ -647,4 +600,101 @@ void checkComamnd(char* topic, byte* payload, unsigned int length) {
       }
     }
   }
+}
+
+
+// -------------
+// MAIN FUNCTIONS
+// -------------
+
+void setup() {
+  delay(500);
+  
+  Serial.begin(115200);
+
+  // pinMode(PIN_SWITCH_LCD, INPUT_PULLUP);  // Set pin X as input with internal pull-up resistor
+  pinMode(PIN_SWITCH_LCD, INPUT_PULLUP);          // Set pin X as input with internal pull-up resistor
+  pinMode(PIN_PH, INPUT);                         // ph
+  pinMode(PIN_PUMP_RELAY, OUTPUT);                // relay
+  pinMode(PIN_VALVE_RELAY, OUTPUT);               // relay
+  pinMode(PIN_SWITCH_PUMP_RELAY, INPUT_PULLUP);   // relay
+  pinMode(PIN_SWITCH_VALVE_RELAY, INPUT_PULLUP);  // relay
+
+  togglePumpRelay(false);
+  toggleValveRelay(false);
+
+  lcd.init();
+  // lcd.begin(16, 2);
+  delay(1);
+  lcd.backlight();  // Turn on the backlight
+  // lcd.print("Water Level:");
+
+  // Start up the library:
+  sensors.begin();
+
+  // waterflow
+	Sensor.begin(count);
+
+  // TDS -- TDS
+  // pinMode(PIN_TDS, INPUT);
+  gravityTds.setPin(PIN_TDS);
+  gravityTds.setAref(3.3);       //reference voltage on ADC, default 5.0V on Arduino UNO
+  gravityTds.setAdcRange(4096);  //1024 for 10bit ADC;4096 for 12bit ADC
+  gravityTds.begin();            //initialization
+
+  // Waterflow
+  // pinMode(PIN_WATERFLOW, INPUT);
+  // attachInterrupt(digitalPinToInterrupt(PIN_WATERFLOW), incrementWaterflowCount, RISING);  //(Interrupt 0(Pin2),function,rising edge)
+  // waterflowTime = millis();
+
+  // wifi
+  wifi_setup();
+
+  // mqtt
+  espClient.setCACert(MQTT_CERT);
+  client.setServer(MQTT_SERVER, MQTT_PORT);
+  client.setCallback(mqtt_callback);
+  mqtt_reconnect(true);
+}
+
+void loop() {
+
+  // mqtt
+  mqtt_reconnect();
+  client.loop();
+  // client.loop();
+  // mqtt_subscribe();
+
+  // Serial.println(String(digitalPinToInterrupt(PIN_WATERFLOW)));
+
+  // button check
+  if (checkElapsedTime(lastButtonCheck, intervalButtonCheck)) {
+    // Serial.println("Button checked");
+    // Serial.print("Btn: ");
+    // Serial.println(digitalRead(PIN_SWITCH_LCD));
+    if (digitalRead(PIN_SWITCH_LCD) == LOW) {
+      lcdCounter += 1;
+      switchLCD();  // force update
+    }
+    if (digitalRead(PIN_SWITCH_PUMP_RELAY) == LOW) {
+      togglePumpRelay(!digitalRead(PIN_PUMP_RELAY));
+    }
+    if (digitalRead(PIN_SWITCH_VALVE_RELAY) == LOW) {
+      toggleValveRelay(!digitalRead(PIN_VALVE_RELAY));
+    }
+  }
+
+  // sensors check
+  // if (checkElapsedTime(lastSensorsCheck, intervalSensorsCheck)) {
+  //   // readTemperature();
+  //   // Serial.println("Sensors checked");
+
+  //   // last
+  //   switchLCD();
+  // }
+
+  switchLCD();
+
+  // Add a delay to avoid rapid updates
+  delay(1000);
 }
