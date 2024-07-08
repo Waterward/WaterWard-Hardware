@@ -197,12 +197,12 @@ String readTurbidity() {
 }
 
 float readTDS() {
+  float tdsValueRaw = analogRead(PIN_TDS);  // then get the value
   // float temperature = readTemperature();  //add your temperature sensor and read it
   float temperature = 25.0;                   //add your temperature sensor and read it
   gravityTds.setTemperature(temperature);     // set the temperature and execute temperature compensation
   gravityTds.update();                        //sample and calculate
   float tdsValue = gravityTds.getTdsValue();  // then get the value
-  float tdsValueRaw = analogRead(PIN_TDS);  // then get the value
   Serial.println("TDS: " + String(tdsValue));
   Serial.println("TDS Raw: " + String(tdsValueRaw));
   // Serial.print(tdsValue);
@@ -433,10 +433,12 @@ int getWaterflowFrequency() {
 // -------------------- FUNCTIONS
 
 void togglePumpRelay(bool value) {
+  value = !value; // relay logic is reversed
   digitalWrite(PIN_PUMP_RELAY, value);
   lastPumpState = value;
 }
 void toggleValveRelay(bool value) {
+  value = !value;
   digitalWrite(PIN_VALVE_RELAY, value);
   lastValveState = value;
 }
@@ -608,7 +610,7 @@ void checkComamnd(char* topic, byte* payload, unsigned int length) {
 // -------------
 
 void setup() {
-  delay(500);
+  // delay(500);
   
   Serial.begin(115200);
 
@@ -636,7 +638,7 @@ void setup() {
 	Sensor.begin(count);
 
   // TDS -- TDS
-  // pinMode(PIN_TDS, INPUT);
+  pinMode(PIN_TDS, INPUT);
   gravityTds.setPin(PIN_TDS);
   gravityTds.setAref(3.3);       //reference voltage on ADC, default 5.0V on Arduino UNO
   gravityTds.setAdcRange(4096);  //1024 for 10bit ADC;4096 for 12bit ADC
